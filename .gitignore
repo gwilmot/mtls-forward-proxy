@@ -1,0 +1,7 @@
+certs/
+client-certs/
+*.key
+*.crt
+*.csr
+*.srl
+k8s/secret-*.yaml

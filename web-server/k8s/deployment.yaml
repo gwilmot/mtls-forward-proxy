@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-webserver
+  namespace: default
+  labels:
+    app: demo-webserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-webserver
+  template:
+    metadata:
+      labels:
+        app: demo-webserver
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - name: https
+              containerPort: 443
+              protocol: TCP
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: nginx-certs
+              mountPath: /etc/nginx/certs
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: 443
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 443
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+        - name: nginx-certs
+          secret:
+            secretName: nginx-certs
+            defaultMode: 0444
