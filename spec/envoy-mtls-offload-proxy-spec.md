@@ -168,7 +168,7 @@ auth.example.com
 - Output a **single `envoy.yaml`** file using the **Envoy v3 xDS API** (`@type` references
   under `envoy.config.listener.v3.*` etc.).
 - Use **static configuration only** (`static_resources`) — no xDS management server.
-- Target **Envoy 1.29+**.
+- Target **Envoy 1.38+**.
 
 ---
 
