@@ -15,10 +15,11 @@ Adding a new backend requires only a cert-manager `Certificate` resource — no 
 
 - Kubernetes 1.24+
 - Helm 3.x
-- cert-manager v1.17+ with `lab-ca-issuer` and `webserver-ca-issuer` ClusterIssuers configured
-- `envoy-upstream-ca` secret containing the webserver CA cert
+- cert-manager v1.17+ with `selfsigned-issuer`, `lab-ca-issuer`, and `webserver-ca-issuer` ClusterIssuers configured
+- `envoy-upstream-ca` secret containing the webserver CA cert (public cert only)
+- No `openssl` required — all CA and leaf keypairs are generated in-cluster by cert-manager
 
-See the [root README](../../README.md) for the full bootstrap procedure including CA generation and cert-manager setup.
+See the [root README](../../README.md) for the full bootstrap procedure.
 
 ---
 

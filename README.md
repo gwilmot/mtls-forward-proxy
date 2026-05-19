@@ -41,7 +41,7 @@ Backend nginx pod (any *.example.com hostname)
 - Helm 3.x
 - kubectl configured against your cluster
 - cert-manager v1.17+ installed in the cluster
-- `openssl` — only needed once to bootstrap the two CA keypairs
+- `openssl` is **not required** — all keys are generated in-cluster by cert-manager
 
 ## Quick start
 
@@ -53,46 +53,61 @@ kubectl rollout status deployment/cert-manager deployment/cert-manager-cainjecto
   -n cert-manager --timeout=120s
 ```
 
-### 2. Bootstrap the two CA keypairs (one-time, openssl)
+### 2. Bootstrap the CA keypairs entirely in-cluster
 
-These are the only keys that ever touch disk. After this step all leaf certs are issued by cert-manager in-cluster.
-
-```bash
-mkdir -p envoy-proxy/client-certs web-server/certs
-
-# Lab CA — signs Envoy's client cert and the wildcard downstream cert
-openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
-  -subj "/CN=lab-ca" \
-  -keyout envoy-proxy/client-certs/ca.key \
-  -out    envoy-proxy/client-certs/ca.crt
-
-# Webserver CA — signs all backend server certs
-openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
-  -subj "/CN=webserver-ca" \
-  -keyout web-server/certs/webserver-ca.key \
-  -out    web-server/certs/webserver-ca.crt
-```
-
-### 3. Load the CA keypairs into cert-manager
+No openssl. No keys on disk. cert-manager generates the CA keypairs inside the cluster and writes them directly to secrets.
 
 ```bash
-# ClusterIssuer secrets must live in the cert-manager namespace
-kubectl create secret tls cert-manager-lab-ca \
-  --cert=envoy-proxy/client-certs/ca.crt \
-  --key=envoy-proxy/client-certs/ca.key \
-  -n cert-manager
+kubectl apply -f - <<'EOF'
+# Step 1 — bootstrapper that signs only the CA certs
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+# Step 2 — Lab CA keypair, generated in-cluster, never touches disk
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: lab-ca
+  namespace: cert-manager
+spec:
+  secretName: cert-manager-lab-ca-new
+  commonName: lab-ca
+  isCA: true
+  privateKey:
+    algorithm: RSA
+    size: 4096
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+  duration: 87600h
+---
+# Step 3 — Webserver CA keypair, generated in-cluster, never touches disk
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: webserver-ca
+  namespace: cert-manager
+spec:
+  secretName: cert-manager-webserver-ca-new
+  commonName: webserver-ca
+  isCA: true
+  privateKey:
+    algorithm: RSA
+    size: 4096
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+  duration: 87600h
+EOF
 
-kubectl create secret tls cert-manager-webserver-ca \
-  --cert=web-server/certs/webserver-ca.crt \
-  --key=web-server/certs/webserver-ca.key \
-  -n cert-manager
-
-# Upstream CA trust anchor for Envoy (CA cert only, no key needed at runtime)
-kubectl create secret generic envoy-upstream-ca \
-  --from-file=tls.crt=web-server/certs/webserver-ca.crt
+kubectl get certificate -n cert-manager   # both should show READY=True
 ```
 
-### 4. Create the ClusterIssuers
+### 3. Create the ClusterIssuers and upstream CA trust anchor
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -102,7 +117,7 @@ metadata:
   name: lab-ca-issuer
 spec:
   ca:
-    secretName: cert-manager-lab-ca
+    secretName: cert-manager-lab-ca-new
 ---
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -110,13 +125,21 @@ metadata:
   name: webserver-ca-issuer
 spec:
   ca:
-    secretName: cert-manager-webserver-ca
+    secretName: cert-manager-webserver-ca-new
 EOF
 
-kubectl get clusterissuer   # both should show READY=True
+kubectl get clusterissuer   # all three should show READY=True
 ```
 
-### 5. Issue certificates via cert-manager
+```bash
+# Upstream CA trust anchor — Envoy uses this to verify backend server certs
+# Extract the webserver CA cert from the in-cluster secret (no private key)
+kubectl create secret generic envoy-upstream-ca \
+  --from-literal=tls.crt="$(kubectl get secret cert-manager-webserver-ca-new \
+    -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d)"
+```
+
+### 4. Issue certificates via cert-manager
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -218,18 +241,22 @@ Client certificate: CN=scanner_sysid,O=lab
 ## Certificate relationships
 
 ```
-lab-ca  (cert-manager ClusterIssuer: lab-ca-issuer)
+lab-ca  (keypair generated in-cluster — secret: cert-manager/cert-manager-lab-ca-new)
+  │  ClusterIssuer: lab-ca-issuer
   ├── *.example.com          — Envoy presents to browser (wildcard)
   └── CN=scanner_sysid       — Envoy presents to every backend (client cert)
 
-webserver-ca  (cert-manager ClusterIssuer: webserver-ca-issuer)
+webserver-ca  (keypair generated in-cluster — secret: cert-manager/cert-manager-webserver-ca-new)
+  │  ClusterIssuer: webserver-ca-issuer
   ├── api.example.com        — nginx server cert
   ├── docs.example.com       — nginx server cert
   └── fred.example.com       — nginx server cert  (and any future backends)
 
-envoy-upstream-ca  (static secret — CA cert only, no key)
+envoy-upstream-ca  (cert only, no private key — secret: default/envoy-upstream-ca)
   └── webserver-ca.crt       — Envoy uses this to verify backend server certs
 ```
+
+No private keys exist on disk or were ever generated outside the cluster.
 
 ## How it works
 
