@@ -1,3 +1,0 @@
-certs/
-client-certs/
-k8s/secret-*.yaml
