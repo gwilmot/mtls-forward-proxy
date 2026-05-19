@@ -30,9 +30,7 @@ Backend nginx pod (any *.example.com hostname)
 
 | Path | Description |
 |------|-------------|
-| `charts/mtls-forward-proxy/` | Helm chart — primary way to deploy everything |
-| `envoy-proxy/k8s/` | Raw kubectl manifests (reference / legacy) |
-| `web-server/k8s/` | Raw kubectl manifests for the demo nginx backend |
+| `charts/mtls-forward-proxy/` | Helm chart — the only supported way to deploy |
 | `spec/` | Architecture spec, config explainer, security review, tech selection |
 
 ## Prerequisites
