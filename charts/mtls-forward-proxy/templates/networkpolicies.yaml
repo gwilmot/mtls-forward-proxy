@@ -1,0 +1,47 @@
+# Only allow pods in the same namespace to reach the proxy on 3128.
+# Prevents other namespaces (or external load-balanced traffic) from using
+# the proxy as an open relay.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-proxy-same-namespace
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mtls-forward-proxy.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mtls-forward-proxy.selectorLabels.envoy" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.namespace }}
+      ports:
+        - port: {{ .Values.envoy.service.proxyPort }}
+---
+{{- if .Values.webserver.enabled }}
+# Only the Envoy proxy pod may connect to backend webservers on 443.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backends-from-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mtls-forward-proxy.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mtls-forward-proxy.selectorLabels.webserver" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "mtls-forward-proxy.selectorLabels.envoy" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.webserver.service.port }}
+{{- end }}
