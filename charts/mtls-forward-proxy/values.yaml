@@ -25,32 +25,26 @@ envoy:
   # Create them with `kubectl create secret generic` before installing the chart
   # (see charts/mtls-forward-proxy/README.md for the exact commands).
   secrets:
-    downstreamCerts: envoy-downstream-certs   # per-hostname certs presented to browser
-    clientCerts: envoy-client-certs           # client cert/key + lab CA for upstream mTLS
-    upstreamCA: envoy-upstream-ca             # CA that signed the webserver's server cert
+    downstreamCerts: envoy-downstream-certs   # wildcard cert presented to browser
+    clientCerts: envoy-client-certs           # client cert/key presented to upstream backends
+    upstreamCA: envoy-upstream-ca             # CA used to verify upstream backend server certs
 
-  # Upstream destinations routed by the proxy.
-  # Each entry must have a matching downstream cert in the downstreamCerts secret
-  # (keys: <hostname>.crt and <hostname>.key).
-  upstreams:
-    - hostname: api.example.com
-      # address is the DNS name Envoy dials for this upstream.
-      # Use a K8s svc FQDN for in-cluster backends, or the public hostname otherwise.
-      # When webserver.enabled=true the chart deploys the demo backend as <release>-webserver.
-      # Set this to "<release>-webserver.<namespace>.svc.cluster.local" to match.
-      address: demo-webserver.default.svc.cluster.local
-      port: 443
-      # upstreamCASecret overrides envoy.secrets.upstreamCA for this route.
-      # Leave empty to use the shared upstreamCA secret.
-      upstreamCASecret: ""
-    - hostname: app.example.com
-      address: app.example.com
-      port: 443
-      upstreamCASecret: ""
-    - hostname: auth.example.com
-      address: auth.example.com
-      port: 443
-      upstreamCASecret: ""
+  # Filenames of the wildcard cert/key within the downstreamCerts secret.
+  downstreamTLS:
+    certFile: wildcard.example.com.crt
+    keyFile: wildcard.example.com.key
+
+  # Optional hostname → backend address overrides.
+  # When a client CONNECTs to a hostname listed here, Envoy dials the given
+  # address instead of resolving the hostname via DNS. Useful when the client-
+  # facing hostname (e.g. api.example.com) differs from the in-cluster service
+  # address (e.g. my-release-webserver.default.svc.cluster.local).
+  # Leave empty to rely purely on DNS for all hosts.
+  hostOverrides: []
+  # Example:
+  # hostOverrides:
+  #   - hostname: api.example.com
+  #     address: my-release-webserver.default.svc.cluster.local
 
   logLevel: info
 

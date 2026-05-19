@@ -3,14 +3,9 @@ mTLS Forward Proxy deployed as release "{{ .Release.Name }}"
 Envoy proxy  : {{ include "mtls-forward-proxy.fullname" . }}-envoy.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.envoy.service.proxyPort }}
 {{- if .Values.webserver.enabled }}
 Demo backend : {{ include "mtls-forward-proxy.fullname" . }}-webserver.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.webserver.service.port }}
-
-NOTE: If you changed the release name, update envoy.upstreams[0].address to:
-  {{ include "mtls-forward-proxy.fullname" . }}-webserver.{{ .Values.namespace }}.svc.cluster.local
-and upgrade: helm upgrade {{ .Release.Name }} charts/mtls-forward-proxy --reuse-values \
-  --set envoy.upstreams[0].address={{ include "mtls-forward-proxy.fullname" . }}-webserver.{{ .Values.namespace }}.svc.cluster.local
 {{- end }}
 
-Test via kubectl port-forward or a curl pod:
+Test the proxy:
   kubectl run curl-test --image=curlimages/curl --rm -it --restart=Never -- \
     curl -x http://{{ include "mtls-forward-proxy.fullname" . }}-envoy.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.envoy.service.proxyPort }} \
     https://api.example.com -k

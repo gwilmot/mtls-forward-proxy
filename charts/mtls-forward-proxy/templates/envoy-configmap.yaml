@@ -22,6 +22,7 @@ data:
       listeners:
 
         # Listener 1: explicit forward proxy on {{ .Values.envoy.service.proxyPort }}
+        # Accepts HTTP CONNECT from clients and tunnels to the internal TLS-terminating listener.
         - name: forward_proxy
           address:
             socket_address:
@@ -46,33 +47,31 @@ data:
                     route_config:
                       name: local_route
                       virtual_hosts:
-                        {{- range .Values.envoy.upstreams }}
-                        - name: {{ .hostname | replace "." "_" }}
-                          domains:
-                            - "{{ .hostname }}"
-                            - "{{ .hostname }}:80"
-                            - "{{ .hostname }}:443"
+                        - name: all_hosts
+                          domains: ["*"]
                           routes:
                             - match:
                                 connect_matcher: {}
                               route:
-                                cluster: internal_tls_{{ .hostname | replace "." "_" }}
+                                cluster: internal_tls_wildcard
                                 upgrade_configs:
                                   - upgrade_type: CONNECT
                                     connect_config: {}
-                            - match:
-                                prefix: "/"
-                              route:
-                                cluster: cluster_{{ .hostname | replace "." "_" }}
-                        {{- end }}
                     http_filters:
+                      - name: envoy.filters.http.dynamic_forward_proxy
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
+                          dns_cache_config:
+                            name: dynamic_dns_cache
+                            dns_lookup_family: V4_ONLY
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
-        # Listener 2: internal TLS-terminating listeners (one per upstream)
-        {{- range .Values.envoy.upstreams }}
-        - name: tls_termination_{{ .hostname | replace "." "_" }}
+        # Listener 2: single internal TLS-terminating listener using the wildcard cert.
+        # Receives the CONNECT tunnel payload, terminates the client's TLS,
+        # then forwards decrypted HTTP to the dynamic forward proxy cluster.
+        - name: tls_termination_wildcard
           internal_listener: {}
           filter_chains:
             - transport_socket:
@@ -82,9 +81,9 @@ data:
                   common_tls_context:
                     tls_certificates:
                       - certificate_chain:
-                          filename: /etc/envoy/certs/{{ .hostname }}.crt
+                          filename: /etc/envoy/certs/{{ .Values.envoy.downstreamTLS.certFile }}
                         private_key:
-                          filename: /etc/envoy/certs/{{ .hostname }}.key
+                          filename: /etc/envoy/certs/{{ .Values.envoy.downstreamTLS.keyFile }}
                     tls_params:
                       tls_minimum_protocol_version: TLSv1_2
                       tls_maximum_protocol_version: TLSv1_3
@@ -92,58 +91,67 @@ data:
                 - name: envoy.filters.network.http_connection_manager
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                    stat_prefix: tls_term_{{ .hostname | replace "." "_" }}
+                    stat_prefix: tls_term_wildcard
                     codec_type: HTTP1
                     route_config:
-                      name: tls_term_route_{{ .hostname | replace "." "_" }}
+                      name: tls_term_route
                       virtual_hosts:
-                        - name: backend
+                        {{- range .Values.envoy.hostOverrides }}
+                        - name: {{ .hostname | replace "." "-" }}
+                          domains: ["{{ .hostname }}", "{{ .hostname }}:443"]
+                          routes:
+                            - match:
+                                prefix: "/"
+                              route:
+                                cluster: dynamic_forward_proxy_cluster
+                                host_rewrite_literal: {{ .address }}
+                        {{- end }}
+                        - name: all_backends
                           domains: ["*"]
                           routes:
                             - match:
                                 prefix: "/"
                               route:
-                                cluster: cluster_{{ .hostname | replace "." "_" }}
+                                cluster: dynamic_forward_proxy_cluster
                     http_filters:
+                      - name: envoy.filters.http.dynamic_forward_proxy
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
+                          dns_cache_config:
+                            name: dynamic_dns_cache
+                            dns_lookup_family: V4_ONLY
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-        {{- end }}
 
       clusters:
 
-        # Internal clusters: route CONNECT tunnels to the TLS-terminating listeners
-        {{- range .Values.envoy.upstreams }}
-        - name: internal_tls_{{ .hostname | replace "." "_" }}
+        # Routes CONNECT tunnels into the single internal TLS-terminating listener.
+        - name: internal_tls_wildcard
           load_assignment:
-            cluster_name: internal_tls_{{ .hostname | replace "." "_" }}
+            cluster_name: internal_tls_wildcard
             endpoints:
               - lb_endpoints:
                   - endpoint:
                       address:
                         envoy_internal_address:
-                          server_listener_name: tls_termination_{{ .hostname | replace "." "_" }}
-        {{- end }}
+                          server_listener_name: tls_termination_wildcard
 
-        # Upstream clusters (mTLS to origin)
-        {{- range .Values.envoy.upstreams }}
-        - name: cluster_{{ .hostname | replace "." "_" }}
-          type: LOGICAL_DNS
-          dns_lookup_family: V4_ONLY
-          load_assignment:
-            cluster_name: cluster_{{ .hostname | replace "." "_" }}
-            endpoints:
-              - lb_endpoints:
-                  - endpoint:
-                      address:
-                        socket_address:
-                          address: {{ .address }}
-                          port_value: {{ .port }}
+        # Dynamic forward proxy cluster — resolves the target host from the request
+        # at runtime via DNS, then connects with mTLS using the configured client cert.
+        - name: dynamic_forward_proxy_cluster
+          lb_policy: CLUSTER_PROVIDED
+          cluster_type:
+            name: envoy.clusters.dynamic_forward_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
+              dns_cache_config:
+                name: dynamic_dns_cache
+                dns_lookup_family: V4_ONLY
           transport_socket:
             name: envoy.transport_sockets.tls
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-              sni: {{ .hostname }}
               common_tls_context:
                 tls_certificates:
                   - certificate_chain:
@@ -156,4 +164,3 @@ data:
                 tls_params:
                   tls_minimum_protocol_version: TLSv1_2
                   tls_maximum_protocol_version: TLSv1_3
-        {{- end }}
