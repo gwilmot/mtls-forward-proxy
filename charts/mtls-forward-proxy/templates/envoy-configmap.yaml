@@ -104,7 +104,10 @@ data:
                                 prefix: "/"
                               route:
                                 cluster: dynamic_forward_proxy_cluster
-                                host_rewrite_literal: {{ .address }}
+                              typed_per_filter_config:
+                                envoy.filters.http.dynamic_forward_proxy:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.PerRouteConfig
+                                  host_rewrite_literal: {{ .address }}
                         {{- end }}
                         - name: all_backends
                           domains: ["*"]
