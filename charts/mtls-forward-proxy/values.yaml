@@ -30,9 +30,10 @@ envoy:
     upstreamCA: envoy-upstream-ca             # CA used to verify upstream backend server certs
 
   # Filenames of the wildcard cert/key within the downstreamCerts secret.
+  # cert-manager issues secrets with tls.crt / tls.key by default.
   downstreamTLS:
-    certFile: wildcard.example.com.crt
-    keyFile: wildcard.example.com.key
+    certFile: tls.crt
+    keyFile: tls.key
 
   # Optional hostname → backend address overrides.
   # When a client CONNECTs to a hostname listed here, Envoy dials the given
