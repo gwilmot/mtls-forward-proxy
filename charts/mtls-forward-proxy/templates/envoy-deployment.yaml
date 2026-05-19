@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mtls-forward-proxy.fullname" . }}-envoy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mtls-forward-proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+spec:
+  replicas: {{ .Values.envoy.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mtls-forward-proxy.selectorLabels.envoy" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mtls-forward-proxy.selectorLabels.envoy" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/envoy-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: envoy
+          image: "{{ .Values.envoy.image.repository }}:{{ .Values.envoy.image.tag }}"
+          imagePullPolicy: {{ .Values.envoy.image.pullPolicy }}
+          args:
+            - -c
+            - /etc/envoy/envoy.yaml
+            - --log-level
+            - {{ .Values.envoy.logLevel }}
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.envoy.service.proxyPort }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.envoy.service.adminPort }}
+              protocol: TCP
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy/envoy.yaml
+              subPath: envoy.yaml
+              readOnly: true
+            - name: downstream-certs
+              mountPath: /etc/envoy/certs
+              readOnly: true
+            - name: client-certs
+              mountPath: /etc/envoy/client-certs
+              readOnly: true
+            - name: upstream-ca
+              mountPath: /etc/envoy/upstream-ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.envoy.service.proxyPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.envoy.service.proxyPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.envoy.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: {{ include "mtls-forward-proxy.fullname" . }}-envoy-config
+        - name: downstream-certs
+          secret:
+            secretName: {{ .Values.envoy.secrets.downstreamCerts }}
+            defaultMode: 0444
+        - name: client-certs
+          secret:
+            secretName: {{ .Values.envoy.secrets.clientCerts }}
+            defaultMode: 0444
+        - name: upstream-ca
+          secret:
+            secretName: {{ .Values.envoy.secrets.upstreamCA }}
+            defaultMode: 0444
+        - name: tmp
+          emptyDir: {}

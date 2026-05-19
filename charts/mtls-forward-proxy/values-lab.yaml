@@ -1,0 +1,12 @@
+# Lab override — points api.example.com at the Helm-managed webserver service
+envoy:
+  upstreams:
+    - hostname: api.example.com
+      address: mtls-webserver.default.svc.cluster.local
+      port: 443
+    - hostname: app.example.com
+      address: app.example.com
+      port: 443
+    - hostname: auth.example.com
+      address: auth.example.com
+      port: 443

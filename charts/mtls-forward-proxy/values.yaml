@@ -1,0 +1,89 @@
+# ── Envoy mTLS forward proxy ──────────────────────────────────────────────────
+
+envoy:
+  image:
+    repository: envoyproxy/envoy
+    tag: v1.38-latest
+    pullPolicy: IfNotPresent
+
+  replicaCount: 1
+
+  service:
+    type: ClusterIP
+    proxyPort: 3128
+    adminPort: 9901
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # Names of pre-existing Kubernetes Secrets that hold the certificates.
+  # Create them with `kubectl create secret generic` before installing the chart
+  # (see charts/mtls-forward-proxy/README.md for the exact commands).
+  secrets:
+    downstreamCerts: envoy-downstream-certs   # per-hostname certs presented to browser
+    clientCerts: envoy-client-certs           # client cert/key + lab CA for upstream mTLS
+    upstreamCA: envoy-upstream-ca             # CA that signed the webserver's server cert
+
+  # Upstream destinations routed by the proxy.
+  # Each entry must have a matching downstream cert in the downstreamCerts secret
+  # (keys: <hostname>.crt and <hostname>.key).
+  upstreams:
+    - hostname: api.example.com
+      # address is the DNS name Envoy dials for this upstream.
+      # Use a K8s svc FQDN for in-cluster backends, or the public hostname otherwise.
+      # When webserver.enabled=true the chart deploys the demo backend as <release>-webserver.
+      # Set this to "<release>-webserver.<namespace>.svc.cluster.local" to match.
+      address: demo-webserver.default.svc.cluster.local
+      port: 443
+      # upstreamCASecret overrides envoy.secrets.upstreamCA for this route.
+      # Leave empty to use the shared upstreamCA secret.
+      upstreamCASecret: ""
+    - hostname: app.example.com
+      address: app.example.com
+      port: 443
+      upstreamCASecret: ""
+    - hostname: auth.example.com
+      address: auth.example.com
+      port: 443
+      upstreamCASecret: ""
+
+  logLevel: info
+
+# ── Demo nginx web-server ─────────────────────────────────────────────────────
+
+webserver:
+  enabled: true
+
+  image:
+    repository: nginx
+    tag: "1.27"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 1
+
+  service:
+    type: ClusterIP
+    port: 443
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  # Name of the pre-existing Secret holding the nginx server cert/key and client CA.
+  # Keys expected: server.crt, server.key, client-ca.crt
+  secret: nginx-certs
+
+# ── Shared metadata ───────────────────────────────────────────────────────────
+
+nameOverride: ""
+fullnameOverride: ""
+namespace: default

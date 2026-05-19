@@ -1,0 +1,19 @@
+{{- if .Values.webserver.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mtls-forward-proxy.fullname" . }}-webserver
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mtls-forward-proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webserver
+spec:
+  type: {{ .Values.webserver.service.type }}
+  selector:
+    {{- include "mtls-forward-proxy.selectorLabels.webserver" . | nindent 4 }}
+  ports:
+    - name: https
+      port: {{ .Values.webserver.service.port }}
+      targetPort: {{ .Values.webserver.service.port }}
+      protocol: TCP
+{{- end }}

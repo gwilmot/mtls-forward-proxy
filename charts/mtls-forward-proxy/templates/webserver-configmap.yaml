@@ -1,0 +1,32 @@
+{{- if .Values.webserver.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mtls-forward-proxy.fullname" . }}-nginx-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mtls-forward-proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webserver
+data:
+  nginx.conf: |
+    events {}
+
+    http {
+        server {
+            listen 443 ssl;
+            server_name api.example.com;
+
+            ssl_certificate     /etc/nginx/certs/server.crt;
+            ssl_certificate_key /etc/nginx/certs/server.key;
+            ssl_protocols       TLSv1.2 TLSv1.3;
+
+            ssl_client_certificate /etc/nginx/certs/client-ca.crt;
+            ssl_verify_client on;
+
+            location / {
+                default_type text/html;
+                return 200 "<!DOCTYPE html>\n<html>\n<head><title>Hello from api.example.com</title></head>\n<body>\n<h1>Hello World</h1>\n<p>mTLS handshake successful.</p>\n<p>Client certificate: $ssl_client_s_dn</p>\n</body>\n</html>\n";
+            }
+        }
+    }
+{{- end }}

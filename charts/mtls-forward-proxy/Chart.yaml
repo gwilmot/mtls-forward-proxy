@@ -1,0 +1,13 @@
+apiVersion: v2
+name: mtls-forward-proxy
+description: Envoy mTLS-offloading forward proxy with demo nginx backend
+type: application
+version: 0.1.0
+appVersion: "1.38"
+keywords:
+  - envoy
+  - mtls
+  - forward-proxy
+  - tls-interception
+maintainers:
+  - name: graham

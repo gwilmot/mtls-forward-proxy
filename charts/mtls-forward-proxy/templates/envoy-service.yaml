@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mtls-forward-proxy.fullname" . }}-envoy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mtls-forward-proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+spec:
+  type: {{ .Values.envoy.service.type }}
+  selector:
+    {{- include "mtls-forward-proxy.selectorLabels.envoy" . | nindent 4 }}
+  ports:
+    - name: proxy
+      port: {{ .Values.envoy.service.proxyPort }}
+      targetPort: {{ .Values.envoy.service.proxyPort }}
+      protocol: TCP
