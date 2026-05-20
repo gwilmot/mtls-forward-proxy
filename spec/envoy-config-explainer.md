@@ -1,6 +1,6 @@
 # Envoy Configuration Explainer
 
-This document walks through `envoy-proxy/envoy.yaml` section by section, explaining what each block does and why it is configured the way it is.
+This document walks through the Envoy config produced by `charts/mtls-forward-proxy/templates/envoy-configmap.yaml`, explaining what each block does and why it is configured the way it is.
 
 ---
 
@@ -16,11 +16,11 @@ static_resources
   clusters             — outbound connection targets
 ```
 
-All configuration is static (no xDS management server). Envoy reads this file once at startup and does not reload dynamically.
+All configuration is static (no xDS management server). Envoy reads this file once at startup and does not reload dynamically. A change to any value that affects the ConfigMap triggers a rolling restart via a `checksum/config` annotation on the Deployment.
 
 ---
 
-## 1. Bootstrap Extensions (lines 1–4)
+## 1. Bootstrap Extensions
 
 ```yaml
 bootstrap_extensions:
@@ -29,13 +29,13 @@ bootstrap_extensions:
       "@type": type.googleapis.com/envoy.extensions.bootstrap.internal_listener.v3.InternalListener
 ```
 
-This enables Envoy's **internal listener** feature. Without it, listeners can only bind to real network sockets. With it, Envoy can create virtual listeners that live entirely in memory — traffic can be routed between them without leaving the process.
+Enables Envoy's **internal listener** feature. Without it, listeners can only bind to real network sockets. With it, Envoy can create virtual listeners that live entirely in memory — traffic can be routed between them without leaving the process.
 
 This is required for the TLS interception architecture used here: the CONNECT tunnel from the browser is handed off to an internal listener that terminates the browser's TLS, all within the same Envoy instance.
 
 ---
 
-## 2. Admin Interface (lines 6–10)
+## 2. Admin Interface
 
 ```yaml
 admin:
@@ -45,22 +45,23 @@ admin:
       port_value: 9901
 ```
 
-The admin interface provides a local HTTP API for inspecting Envoy's state — active connections, cluster health, configuration dumps, and metrics. It is bound to `127.0.0.1` only, so it is never reachable from outside the pod. Binding it to `0.0.0.0` would expose configuration and traffic control endpoints to the network, which would be a significant security risk.
+The admin interface provides a local HTTP API for inspecting Envoy's state — active connections, cluster health, configuration dumps, and metrics. Bound to `127.0.0.1` only so it is never reachable from outside the pod.
 
 Useful endpoints when debugging:
 - `GET /ready` — is Envoy ready to serve traffic?
-- `GET /clusters` — what clusters exist and are their endpoints healthy?
-- `GET /config_dump` — what is the full running configuration?
+- `GET /clusters` — cluster health and endpoint state
+- `GET /stats` — all counters and gauges, including `dns_cache.*`
+- `GET /config_dump` — full running configuration
 
 ---
 
 ## 3. Listeners
 
-Listeners are where Envoy accepts incoming connections. This config has two: one bound to a real network port, and one that is internal-only.
+This config has two listeners: one bound to a real network port, and one that is internal-only.
 
 ---
 
-### Listener 1: `forward_proxy` (lines 19–82)
+### Listener 1: `forward_proxy`
 
 ```yaml
 - name: forward_proxy
@@ -70,32 +71,18 @@ Listeners are where Envoy accepts incoming connections. This config has two: one
       port_value: 3128
 ```
 
-This is the **entry point**. It binds on all interfaces on port 3128, which is the conventional port for an explicit HTTP proxy. Clients (browsers, curl) are configured to send all their traffic here.
+The **entry point**. Binds on all interfaces on port 3128 (the conventional explicit proxy port). Clients (browsers, curl) are configured to send all their traffic here. No `transport_socket` — it accepts **plain TCP**. With an explicit proxy the client must send a plaintext `CONNECT` request before any TLS can happen.
 
-The listener has no `transport_socket`, meaning it accepts **plain TCP** — no TLS at this level. Clients connect in cleartext, which is intentional. With an explicit proxy, the client first needs to send a plaintext `CONNECT` request or a plain HTTP `GET` before any TLS can happen.
-
-#### HTTP Connection Manager filter (lines 26–82)
-
-```yaml
-- name: envoy.filters.network.http_connection_manager
-```
-
-The HCM is Envoy's main HTTP processing filter. It parses the incoming TCP stream as HTTP, applies routing logic, and forwards requests to clusters. Everything below it describes how that HTTP parsing and routing works.
-
-```yaml
-codec_type: HTTP1
-```
-
-Forces HTTP/1.1 parsing. Browsers use HTTP/1.1 when talking to an explicit proxy — they don't use HTTP/2 for the CONNECT request itself.
+#### upgrade_configs: CONNECT
 
 ```yaml
 upgrade_configs:
   - upgrade_type: CONNECT
 ```
 
-This tells the HCM to accept the `CONNECT` method. By default Envoy rejects CONNECT — this line enables the forward proxy tunnel behaviour. When a browser sends `CONNECT api.example.com:443 HTTP/1.1`, Envoy handles it rather than returning 405.
+Tells the HCM to accept the `CONNECT` method. By default Envoy rejects CONNECT — this enables forward proxy tunnel behaviour. When a browser sends `CONNECT api.example.com:443 HTTP/1.1`, Envoy handles it rather than returning 405.
 
-#### Access Logging (lines 33–39)
+#### Access Logging
 
 ```yaml
 access_log:
@@ -106,72 +93,54 @@ access_log:
         text_format: "[%START_TIME%] \"%REQ(:METHOD)% ..."
 ```
 
-Every request is logged to stdout in a format similar to nginx/Apache combined log. Writing to `/dev/stdout` means the logs appear in `kubectl logs` output. The format records the timestamp, method, path, protocol, response code, bytes sent, host header, and user-agent.
+Every request logged to stdout, visible in `kubectl logs`. Records timestamp, method, path, protocol, response code, bytes sent, host, and user-agent.
 
-#### Route Config (lines 40–78)
-
-The route config is the forwarding table — it maps incoming requests to upstream clusters based on the `Host` header (for plain HTTP) or the CONNECT authority (for tunnels).
+#### Route Config
 
 ```yaml
 virtual_hosts:
-  - name: api_example_com
-    domains: ["api.example.com", "api.example.com:80", "api.example.com:443"]
+  - name: all_hosts
+    domains: ["*"]
+    routes:
+      - match:
+          connect_matcher: {}
+        route:
+          cluster: internal_tls_wildcard
+          upgrade_configs:
+            - upgrade_type: CONNECT
+              connect_config: {}
 ```
 
-A virtual host matches on the `Host` header value. All three domain entries are needed because:
-- `api.example.com` — matches plain HTTP GET requests (`Host: api.example.com`)
-- `api.example.com:80` — matches when curl uses `--proxytunnel` with an `http://` URL (sends `CONNECT api.example.com:80`)
-- `api.example.com:443` — matches browser HTTPS (sends `CONNECT api.example.com:443`)
+A single catch-all virtual host matches every hostname. The `connect_matcher` matches only `CONNECT` method requests — any CONNECT tunnel (regardless of hostname) is routed to the `internal_tls_wildcard` cluster, which delivers it to the internal TLS-terminating listener.
 
-The `app.example.com` and `auth.example.com` virtual hosts only need `:443` because those are external hosts that browsers would only reach over HTTPS.
+`connect_config: {}` tells Envoy to **terminate** the CONNECT — it responds `200 OK` and the tunnel is established. Bytes from the browser after that point are forwarded into the internal listener.
 
-#### Two routes for `api.example.com`
-
-```yaml
-routes:
-  # CONNECT tunnel → internal TLS-terminating listener
-  - match:
-      connect_matcher: {}
-    route:
-      cluster: internal_tls_api
-      upgrade_configs:
-        - upgrade_type: CONNECT
-          connect_config: {}
-
-  # Plain HTTP GET → upstream mTLS directly
-  - match:
-      prefix: "/"
-    route:
-      cluster: cluster_api_example_com
-```
-
-Routes are evaluated top-to-bottom. The `connect_matcher` matches only `CONNECT` method requests — when a browser opens a CONNECT tunnel, it is sent to the `internal_tls_api` cluster (which forwards to the internal TLS-terminating listener). The `prefix: "/"` route is the fallback, matching any plain HTTP GET/POST request and sending it directly to the upstream mTLS cluster.
-
-The `CONNECT` route's `connect_config: {}` tells Envoy to **terminate** the CONNECT request — it responds with `200 OK` and then the tunnel is established. Bytes flowing in from the browser after that point are forwarded to the target cluster.
-
-#### HTTP Router filter (lines 79–82)
+#### Dynamic Forward Proxy filter
 
 ```yaml
 http_filters:
-  - name: envoy.filters.http.router
+  - name: envoy.filters.http.dynamic_forward_proxy
+    typed_config:
+      "@type": ...FilterConfig
+      dns_cache_config:
+        name: dynamic_dns_cache
+        dns_lookup_family: V4_ONLY
 ```
 
-This must always be the last filter in the chain. It is the component that actually executes the routing decisions — forwarding requests to the matched cluster. Filters earlier in the chain (auth, rate-limiting, etc.) can modify or reject requests; the router is what sends them onward.
+The DFP filter is present on this listener to populate the shared DNS cache as connections arrive. The actual DNS-based routing happens in Listener 2 and the DFP cluster.
 
 ---
 
-### Listener 2: `tls_termination_api` (lines 88–123)
+### Listener 2: `tls_termination_wildcard`
 
 ```yaml
-- name: tls_termination_api
+- name: tls_termination_wildcard
   internal_listener: {}
 ```
 
-This is an **internal listener** — it has no network socket. Traffic reaches it only from other parts of Envoy via the `internal_tls_api` cluster (see clusters section). It exists to perform TLS termination on the bytes coming out of the CONNECT tunnel.
+An **internal listener** — no network socket. Traffic reaches it only from other parts of Envoy via the `internal_tls_wildcard` cluster. Its job is to terminate the browser's TLS using the wildcard cert, then route the decrypted HTTP to the dynamic forward proxy cluster.
 
-When a browser establishes a CONNECT tunnel and then sends a TLS ClientHello (as it always does for HTTPS), those encrypted bytes arrive here. This listener unwraps them.
-
-#### Downstream TLS context (lines 91–103)
+#### Downstream TLS context
 
 ```yaml
 transport_socket:
@@ -181,139 +150,129 @@ transport_socket:
     common_tls_context:
       tls_certificates:
         - certificate_chain:
-            filename: /etc/envoy/certs/api.example.com.crt
+            filename: /etc/envoy/certs/tls.crt
           private_key:
-            filename: /etc/envoy/certs/api.example.com.key
+            filename: /etc/envoy/certs/tls.key
       tls_params:
         tls_minimum_protocol_version: TLSv1_2
         tls_maximum_protocol_version: TLSv1_3
 ```
 
-This is the **server side** of a TLS handshake. Envoy presents `api.example.com.crt` to the browser, the browser verifies it (assuming it has been added to the trust store), and the TLS session is established. After this, Envoy can see the plaintext HTTP inside.
+Envoy acts as TLS **server** toward the browser, presenting the `*.example.com` wildcard cert (`tls.crt` / `tls.key` — cert-manager's standard key names). Because it is a wildcard, this single cert covers every `*.example.com` hostname — no per-hostname certs are needed. The cert is mounted from the `envoy-downstream-certs` Secret, issued by cert-manager's `lab-ca-issuer`.
 
-`DownstreamTlsContext` means "I am the TLS server here" — the entity terminating TLS from the client. The key and certificate are mounted from a Kubernetes Secret.
+TLS 1.0 and 1.1 are not permitted.
 
-TLS versions are restricted to 1.2 and 1.3. TLS 1.0 and 1.1 are not permitted.
-
-#### HCM inside the internal listener (lines 104–123)
+#### Route Config — hostOverrides
 
 ```yaml
-filters:
-  - name: envoy.filters.network.http_connection_manager
+virtual_hosts:
+  {{- range .Values.envoy.hostOverrides }}
+  - name: {{ .hostname | replace "." "-" }}
+    domains: ["{{ .hostname }}", "{{ .hostname }}:443"]
+    routes:
+      - match:
+          prefix: "/"
+        route:
+          cluster: dynamic_forward_proxy_cluster
+        typed_per_filter_config:
+          envoy.filters.http.dynamic_forward_proxy:
+            "@type": ...PerRouteConfig
+            host_rewrite_literal: {{ .address }}
+  {{- end }}
+  - name: all_backends
+    domains: ["*"]
+    routes:
+      - match:
+          prefix: "/"
+        route:
+          cluster: dynamic_forward_proxy_cluster
 ```
 
-Once the browser's TLS is unwrapped, the decrypted bytes are HTTP — so another HCM takes over to parse them and route them.
+For hostnames listed in `hostOverrides` (e.g. `api.example.com`), the route carries a `typed_per_filter_config` that rewrites the upstream hostname to the K8s service address (e.g. `mtls-webserver.default.svc.cluster.local`) **before** the DFP filter performs its DNS lookup. This is necessary because client-facing hostnames like `api.example.com` have no in-cluster DNS entry — without the rewrite, DFP would fail to resolve them.
+
+The rewrite must be in `typed_per_filter_config`, not on the route action's `host_rewrite_literal`. The DFP filter runs before the router, so only per-filter config is visible to it at DNS lookup time.
+
+For any hostname not in `hostOverrides`, the catch-all `all_backends` virtual host forwards to the DFP cluster without rewriting — DNS resolution uses the original hostname directly. This handles any public external service without any config changes.
+
+The backend server cert must include both the public hostname **and** the K8s service FQDN as SANs, because Envoy validates the upstream cert against the rewritten (service FQDN) hostname.
+
+#### Dynamic Forward Proxy filter (Listener 2)
 
 ```yaml
-route_config:
-  virtual_hosts:
-    - name: api
-      domains: ["*"]
-      routes:
-        - match:
-            prefix: "/"
-          route:
-            cluster: cluster_api_example_com
+http_filters:
+  - name: envoy.filters.http.dynamic_forward_proxy
+    typed_config:
+      dns_cache_config:
+        name: dynamic_dns_cache
+        dns_lookup_family: V4_ONLY
 ```
 
-The wildcard domain `"*"` matches everything — at this point we already know the request is for `api.example.com` (that was established by the outer listener's routing). The only job here is to forward all requests to `cluster_api_example_com`, which will open the upstream mTLS connection to nginx.
+Shares the same named DNS cache (`dynamic_dns_cache`) as Listener 1. Performs the actual DNS resolution of the upstream hostname (after any `host_rewrite_literal` override) and sets the endpoint for the router to forward to.
 
 ---
 
 ## 4. Clusters
 
-Clusters define how Envoy connects to upstream services. Each cluster has an address to connect to, and optionally a transport socket that wraps the connection in TLS.
-
 ---
 
-### `internal_tls_api` (lines 128–136)
+### `internal_tls_wildcard`
 
 ```yaml
-- name: internal_tls_api
+- name: internal_tls_wildcard
   load_assignment:
     endpoints:
       - lb_endpoints:
           - endpoint:
               address:
                 envoy_internal_address:
-                  server_listener_name: tls_termination_api
+                  server_listener_name: tls_termination_wildcard
 ```
 
-This cluster has no network address. Instead of a `socket_address`, it has an `envoy_internal_address` pointing to the `tls_termination_api` listener by name. This is what makes the internal listener pattern work — the `forward_proxy` listener routes CONNECT tunnels to this cluster, which delivers the traffic to the `tls_termination_api` internal listener rather than out to the network.
-
-There is no transport socket here because the connection is internal — it never leaves the Envoy process.
+No network address — uses `envoy_internal_address` to route traffic to the `tls_termination_wildcard` internal listener by name. This is what connects the two listeners together: Listener 1 routes CONNECT tunnels here, and this cluster delivers them to Listener 2. No transport socket because the connection never leaves the Envoy process.
 
 ---
 
-### `cluster_api_example_com` (lines 139–167)
+### `dynamic_forward_proxy_cluster`
 
 ```yaml
-- name: cluster_api_example_com
-  type: LOGICAL_DNS
-  dns_lookup_family: V4_ONLY
-  load_assignment:
-    endpoints:
-      - lb_endpoints:
-          - endpoint:
-              address:
-                socket_address:
-                  address: demo-webserver.default.svc.cluster.local
-                  port_value: 443
+- name: dynamic_forward_proxy_cluster
+  lb_policy: CLUSTER_PROVIDED
+  cluster_type:
+    name: envoy.clusters.dynamic_forward_proxy
+    typed_config:
+      "@type": ...ClusterConfig
+      dns_cache_config:
+        name: dynamic_dns_cache
+        dns_lookup_family: V4_ONLY
+  transport_socket:
+    name: envoy.transport_sockets.tls
+    typed_config:
+      "@type": ...UpstreamTlsContext
+      common_tls_context:
+        tls_certificates:
+          - certificate_chain:
+              filename: /etc/envoy/client-certs/tls.crt
+            private_key:
+              filename: /etc/envoy/client-certs/tls.key
+        validation_context:
+          trusted_ca:
+            filename: /etc/envoy/upstream-ca/tls.crt
+        tls_params:
+          tls_minimum_protocol_version: TLSv1_2
+          tls_maximum_protocol_version: TLSv1_3
 ```
 
-`LOGICAL_DNS` means Envoy resolves the hostname via DNS and connects to the result. It re-resolves periodically but maintains a single connection per resolved address. This is appropriate for Kubernetes in-cluster DNS names where the IP may change if the pod restarts.
+The single upstream cluster for all backends. `lb_policy: CLUSTER_PROVIDED` and the `dynamic_forward_proxy` cluster type work together — the DFP filter resolves the hostname via DNS and tells the cluster which endpoint to use at request time. No static endpoint list is needed.
 
-`demo-webserver.default.svc.cluster.local` is the fully-qualified DNS name of the nginx Kubernetes Service in the `default` namespace. Envoy connects to port 443.
+**`tls_certificates`** — This is the **mTLS** part. Envoy presents `tls.crt` (CN=scanner_sysid, issued by lab-ca) to every backend during the TLS handshake. The backend verifies it and sees the client identity. The cert is mounted from the `envoy-client-certs` Secret, issued by cert-manager's `lab-ca-issuer`.
 
-#### Upstream TLS context (lines 151–167)
+**`validation_context.trusted_ca`** — Envoy verifies each backend's server cert against `tls.crt` from the `envoy-upstream-ca` Secret. This Secret contains only the public cert of the webserver CA (extracted from cert-manager's `cert-manager-webserver-ca-new` Secret — no private key). All backend server certs are issued by `webserver-ca-issuer`, so they all pass this check.
 
-```yaml
-transport_socket:
-  name: envoy.transport_sockets.tls
-  typed_config:
-    "@type": ...UpstreamTlsContext
-    sni: api.example.com
-    common_tls_context:
-      tls_certificates:
-        - certificate_chain:
-            filename: /etc/envoy/client-certs/client.crt
-          private_key:
-            filename: /etc/envoy/client-certs/client.key
-      validation_context:
-        trusted_ca:
-          filename: /etc/envoy/upstream-ca/webserver-ca.crt
-      tls_params:
-        tls_minimum_protocol_version: TLSv1_2
-        tls_maximum_protocol_version: TLSv1_3
-```
-
-`UpstreamTlsContext` means "I am the TLS client here" — Envoy is initiating the connection to nginx.
-
-**`sni: api.example.com`** — Sets the TLS SNI (Server Name Indication) field in the ClientHello. This tells nginx which hostname Envoy is connecting to, allowing nginx to select the correct certificate if it serves multiple hostnames. It also means nginx's certificate must be valid for `api.example.com`.
-
-**`tls_certificates`** — This is the **mTLS** part. Envoy presents `client.crt` (CN=scanner_sysid) to nginx during the TLS handshake. nginx is configured to require and verify this certificate. Without this block, the connection would be standard one-way TLS (only nginx authenticates itself); with it, both sides authenticate — mutual TLS.
-
-**`validation_context.trusted_ca`** — Envoy verifies nginx's server certificate against `webserver-ca.crt`. This is the CA that signed nginx's server cert. Without this check, Envoy would accept any certificate from any server, opening the connection to MitM attacks. The file is mounted from the `envoy-upstream-ca` Kubernetes Secret.
+Adding a new backend requires no changes here — as long as its server cert is issued by `webserver-ca-issuer`, Envoy will trust it automatically.
 
 ---
 
-### `cluster_app_example_com` and `cluster_auth_example_com` (lines 170–229)
-
-These two clusters follow the identical pattern but point to external hostnames (`app.example.com` and `auth.example.com`) rather than the in-cluster demo web server.
-
-The key difference from `cluster_api_example_com` is:
-
-```yaml
-validation_context:
-  trusted_ca:
-    filename: /etc/ssl/certs/ca-certificates.crt
-```
-
-These clusters use the system CA bundle rather than a pinned CA. This is appropriate when connecting to public internet services with publicly-trusted certificates, but is a security weakness for internal services (see `security-review.md`, HIGH-5).
-
----
-
-## Data Flow Summary
+## Data Flow
 
 ```
 Browser
@@ -321,36 +280,38 @@ Browser
   │  CONNECT api.example.com:443 HTTP/1.1   (plaintext → port 3128)
   ▼
 [Listener 1: forward_proxy]
-  │  matches domains: api.example.com:443
-  │  connect_matcher → route to internal_tls_api cluster
-  │
+  │  catch-all virtual host, connect_matcher → internal_tls_wildcard cluster
+  │  DFP filter populates dns_cache
   │  200 OK (tunnel established)
   │
   │  <TLS ClientHello from browser>
   ▼
-[Cluster: internal_tls_api]
-  │  envoy_internal_address → tls_termination_api listener
+[Cluster: internal_tls_wildcard]
+  │  envoy_internal_address → tls_termination_wildcard listener
   ▼
-[Listener 2: tls_termination_api]  (internal, no network socket)
-  │  DownstreamTlsContext: presents api.example.com.crt to browser
-  │  TLS handshake completes; browser's traffic is now decrypted
+[Listener 2: tls_termination_wildcard]  (internal, no network socket)
+  │  DownstreamTlsContext: presents *.example.com wildcard cert to browser
+  │  TLS handshake completes; browser traffic is now decrypted
   │
   │  GET / HTTP/1.1 (plaintext HTTP, now visible to Envoy)
-  │  route: prefix "/" → cluster_api_example_com
+  │  hostOverride match: api.example.com → host_rewrite_literal: mtls-webserver.default.svc.cluster.local
+  │  DFP filter resolves mtls-webserver.default.svc.cluster.local via DNS
+  │  route → dynamic_forward_proxy_cluster
   ▼
-[Cluster: cluster_api_example_com]
-  │  DNS: demo-webserver.default.svc.cluster.local:443
+[Cluster: dynamic_forward_proxy_cluster]
+  │  endpoint: resolved IP of mtls-webserver service, port 443
   │  UpstreamTlsContext:
-  │    - sni: api.example.com
-  │    - presents client.crt (CN=scanner_sysid) to nginx   ← mTLS
-  │    - verifies nginx cert against webserver-ca.crt
+  │    - presents tls.crt (CN=scanner_sysid) to backend   ← mTLS client cert
+  │    - verifies backend cert against webserver-ca tls.crt
   ▼
-nginx (demo-webserver)
-  │  ssl_verify_client on → verifies client.crt against lab-ca ✓
+nginx backend
+  │  ssl_verify_client on → verifies client cert against lab-ca ✓
   │  serves response
   ▼
 Response travels back through the same chain to the browser
 ```
+
+For a backend with no `hostOverride` (e.g. a public SaaS API), the flow is identical except the DFP filter resolves the original hostname directly via external DNS — no rewrite step.
 
 ---
 
@@ -359,11 +320,14 @@ Response travels back through the same chain to the browser
 | Concept | Where used | What it means |
 |---------|-----------|---------------|
 | `DownstreamTlsContext` | Listener 2 | Envoy acts as TLS **server** toward the browser |
-| `UpstreamTlsContext` | All clusters | Envoy acts as TLS **client** toward the origin |
-| `tls_certificates` in upstream | `cluster_api_example_com` | Envoy presents a client certificate — this is the **mTLS** part |
-| `validation_context` | All clusters | Envoy verifies the origin's server certificate |
-| `connect_matcher` | Listener 1 routes | Matches HTTP `CONNECT` method only |
-| `connect_config: {}` | Listener 1 routes | Terminates the CONNECT — Envoy responds 200 and owns the tunnel |
-| `envoy_internal_address` | `internal_tls_api` cluster | Routes to an internal listener, not a network socket |
-| `internal_listener: {}` | Listener 2 | Creates a virtual listener with no network binding |
-| `LOGICAL_DNS` | All real clusters | Resolve hostname via DNS; reconnect if IP changes |
+| `UpstreamTlsContext` | DFP cluster | Envoy acts as TLS **client** toward every backend |
+| `tls_certificates` in upstream | DFP cluster | Envoy presents a client certificate — this is the **mTLS** part |
+| `validation_context` | DFP cluster | Envoy verifies every backend's server cert against the webserver CA |
+| Wildcard cert | Listener 2 | One `*.example.com` cert covers all backends — no per-hostname certs |
+| `connect_matcher` | Listener 1 | Matches HTTP `CONNECT` method only |
+| `connect_config: {}` | Listener 1 | Terminates the CONNECT — Envoy responds 200 and owns the tunnel |
+| `envoy_internal_address` | `internal_tls_wildcard` | Routes to an internal listener, not a network socket |
+| `internal_listener: {}` | Listener 2 | Virtual listener with no network binding |
+| Dynamic forward proxy | Listener 2 + DFP cluster | Resolves upstream hostname via DNS at request time — no static upstream list |
+| `host_rewrite_literal` | `typed_per_filter_config` | Rewrites hostname before DFP DNS lookup — required for in-cluster services |
+| `hostOverrides` | values.yaml | Maps client-facing hostname to K8s service FQDN for in-cluster backends |
