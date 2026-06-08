@@ -3,10 +3,11 @@
 Deploys the Envoy mTLS-offloading forward proxy and an optional demo nginx backend.
 
 ```
-Browser ──CONNECT──► Envoy :3128 ──mTLS──► any *.example.com backend
-                      │ wildcard TLS termination (*.example.com)
-                      │ dynamic forward proxy — DNS resolution at request time
-                      │ client cert (CN=scanner_sysid) presented to every backend
+Browser ──TLS+CONNECT──► Envoy :3128 ──mTLS──► any *.example.com backend
+                          │ Session A: outer TLS on port 3128 (wildcard cert + proxy SAN)
+                          │ Session B: inner wildcard TLS termination (*.example.com)
+                          │ Session C: upstream mTLS, CN=scanner_sysid presented to backend
+                          │ dynamic forward proxy — DNS resolution at request time
 ```
 
 Adding a new backend requires only a cert-manager `Certificate` resource — no changes to the proxy config or chart values.
@@ -29,7 +30,7 @@ The chart reads four pre-existing secrets. All are issued by cert-manager except
 
 | Secret | Contents | Managed by |
 |--------|----------|------------|
-| `envoy-downstream-certs` | Wildcard `*.example.com` cert/key | cert-manager (`envoy-downstream-wildcard` Certificate) |
+| `envoy-downstream-certs` | Wildcard `*.example.com` cert/key — also used as the port-3128 listener cert; **must include the proxy hostname as a SAN** | cert-manager (`envoy-downstream-wildcard` Certificate) |
 | `envoy-client-certs` | Envoy client cert `CN=scanner_sysid` + lab CA | cert-manager (`envoy-client-cert` Certificate) |
 | `envoy-upstream-ca` | `webserver-ca.crt` trust anchor | Manual (CA cert only — nothing to rotate) |
 | `nginx-certs` | Backend server cert/key + lab CA | cert-manager (`api-webserver-cert` Certificate) |
@@ -118,7 +119,7 @@ The wildcard downstream cert already covers the new hostname — no Envoy config
 
 ```bash
 kubectl run curl-test --image=curlimages/curl --rm -it --restart=Never -- \
-  curl -x http://mtls-envoy.default.svc.cluster.local:3128 \
+  curl -x https://mtls-envoy.default.svc.cluster.local:3128 \
   https://api.example.com -k -s
 ```
 
@@ -126,7 +127,7 @@ kubectl run curl-test --image=curlimages/curl --rm -it --restart=Never -- \
 
 ```bash
 kubectl port-forward svc/mtls-envoy 3128:3128 &
-curl -x http://localhost:3128 https://api.example.com -k
+curl -x https://localhost:3128 https://api.example.com -k
 ```
 
 Expected response:
@@ -165,7 +166,7 @@ For backends reachable via real external DNS (e.g. a public SaaS API), no overri
 | `envoy.service.proxyPort` | `3128` | Proxy listener port |
 | `envoy.service.adminPort` | `9901` | Envoy admin port (localhost only inside pod) |
 | `envoy.logLevel` | `info` | Envoy log level |
-| `envoy.downstreamTLS.certFile` | `tls.crt` | Cert key name in `downstreamCerts` secret |
+| `envoy.downstreamTLS.certFile` | `tls.crt` | Cert key name in `downstreamCerts` secret — used for both the port-3128 listener (Session A) and inner TLS (Session B) |
 | `envoy.downstreamTLS.keyFile` | `tls.key` | Key name in `downstreamCerts` secret |
 | `envoy.secrets.downstreamCerts` | `envoy-downstream-certs` | Secret with wildcard downstream cert |
 | `envoy.secrets.clientCerts` | `envoy-client-certs` | Secret with Envoy client cert |

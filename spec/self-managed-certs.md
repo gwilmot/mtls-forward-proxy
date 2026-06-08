@@ -33,14 +33,18 @@ openssl req -new -x509 -days 3650 -key webserver-ca.key -out webserver-ca.crt -s
 
 ## 2. Wildcard downstream cert
 
-Envoy presents this to browsers for all `*.example.com` hostnames.
+Envoy presents this cert for all `*.example.com` hostnames (Session B — inner TLS) **and**
+as the listener cert on port 3128 (Session A — outer TLS). Both sessions share a single
+cert and secret, so the proxy's own hostname must be included as an additional SAN.
+
+Replace `proxy.example.com` with the actual hostname clients use to reach the proxy.
 
 ```bash
 openssl genrsa -out wildcard.key 2048
 openssl req -new -key wildcard.key -out wildcard.csr -subj "/CN=*.example.com"
 openssl x509 -req -days 3650 -in wildcard.csr -CA lab-ca.crt -CAkey lab-ca.key \
   -CAcreateserial -out wildcard.crt \
-  -extfile <(printf "subjectAltName=DNS:*.example.com")
+  -extfile <(printf "subjectAltName=DNS:*.example.com,DNS:proxy.example.com")
 ```
 
 ---

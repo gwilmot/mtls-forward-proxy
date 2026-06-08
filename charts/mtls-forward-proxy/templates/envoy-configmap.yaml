@@ -22,14 +22,29 @@ data:
       listeners:
 
         # Listener 1: explicit forward proxy on {{ .Values.envoy.service.proxyPort }}
-        # Accepts HTTP CONNECT from clients and tunnels to the internal TLS-terminating listener.
+        # Accepts TLS-wrapped HTTP CONNECT from clients (Session A) and tunnels to
+        # the internal TLS-terminating listener (Session B). Reuses the downstream
+        # wildcard cert — the proxy hostname must be included as a SAN on that cert.
         - name: forward_proxy
           address:
             socket_address:
               address: 0.0.0.0
               port_value: {{ .Values.envoy.service.proxyPort }}
           filter_chains:
-            - filters:
+            - transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  common_tls_context:
+                    tls_certificates:
+                      - certificate_chain:
+                          filename: /etc/envoy/certs/{{ .Values.envoy.downstreamTLS.certFile }}
+                        private_key:
+                          filename: /etc/envoy/certs/{{ .Values.envoy.downstreamTLS.keyFile }}
+                    tls_params:
+                      tls_minimum_protocol_version: TLSv1_2
+                      tls_maximum_protocol_version: TLSv1_3
+              filters:
                 - name: envoy.filters.network.http_connection_manager
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager

@@ -7,24 +7,30 @@ An Envoy-based explicit forward proxy that offloads mTLS client certificate auth
 ```
 Browser / curl (no client cert)
     │
-    │  CONNECT docs.example.com:443   (plaintext, port 3128)
+    │  TLS → CONNECT docs.example.com:443   (HTTPS proxy, port 3128)  ← Session A
     ▼
 ┌─────────────────────────────────────────────────────────┐
 │                    Envoy Proxy (K8s)                    │
 │                                                         │
-│  1. Accept CONNECT — wildcard cert (*.example.com)      │
-│  2. Terminate downstream TLS                            │
-│  3. Resolve upstream via DNS (dynamic forward proxy)    │
-│  4. Open mTLS connection presenting CN=scanner_sysid    │
-│  5. Bridge decrypted bytes back to client               │
+│  1. Terminate outer TLS on port 3128 (Session A)        │
+│     wildcard cert with proxy hostname SAN               │
+│  2. Accept CONNECT — establish tunnel                   │
+│  3. Terminate inner downstream TLS (Session B)          │
+│     wildcard cert (*.example.com)                       │
+│  4. Resolve upstream via DNS (dynamic forward proxy)    │
+│  5. Open mTLS connection presenting CN=scanner_sysid    │
+│     (Session C)                                         │
+│  6. Bridge decrypted bytes back to client               │
 └─────────────────────────────────────────────────────────┘
     │
-    │  mTLS — client cert verified by backend
+    │  mTLS — client cert verified by backend  ← Session C
     ▼
 Backend nginx pod (any *.example.com hostname)
     - requires client cert signed by lab CA
     - responds with client CN in body
 ```
+
+All three legs are TLS-encrypted. Session A encrypts the proxy connection itself (CONNECT request included). Session B independently encrypts the application payload. Session C is mutual TLS to the backend.
 
 ## Repo layout
 
@@ -141,7 +147,9 @@ kubectl create secret generic envoy-upstream-ca \
 
 ```bash
 kubectl apply -f - <<'EOF'
-# Envoy wildcard downstream cert (browser-facing)
+# Envoy wildcard downstream + listener cert (shared)
+# dnsNames must include the proxy's own hostname so clients can validate
+# the TLS connection to port 3128. Replace proxy.example.com as needed.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -150,7 +158,9 @@ metadata:
 spec:
   secretName: envoy-downstream-certs
   commonName: "*.example.com"
-  dnsNames: ["*.example.com"]
+  dnsNames:
+    - "*.example.com"
+    - proxy.example.com
   issuerRef:
     name: lab-ca-issuer
     kind: ClusterIssuer
@@ -224,11 +234,11 @@ Restart Chrome/Safari after adding.
 # Port-forward the proxy (keep this terminal open)
 kubectl port-forward svc/mtls-envoy 3128:3128
 
-# curl from your laptop
-curl -x http://localhost:3128 https://api.example.com -k
+# curl from your laptop — note https:// proxy scheme (not http://)
+curl -x https://localhost:3128 https://api.example.com -k
 ```
 
-Set your browser proxy to `localhost:3128` and navigate to `https://api.example.com`. The browser sends CONNECT — Envoy resolves and dials the backend over mTLS. No client DNS resolution required.
+Set your browser proxy to `localhost:3128` with **HTTPS** proxy protocol and navigate to `https://api.example.com`. The browser sends CONNECT inside a TLS session — Envoy resolves and dials the backend over mTLS. No client DNS resolution required.
 
 Expected response body:
 ```
@@ -241,8 +251,8 @@ Client certificate: CN=scanner_sysid,O=lab
 ```
 lab-ca  (keypair generated in-cluster — secret: cert-manager/cert-manager-lab-ca-new)
   │  ClusterIssuer: lab-ca-issuer
-  ├── *.example.com          — Envoy presents to browser (wildcard)
-  └── CN=scanner_sysid       — Envoy presents to every backend (client cert)
+  ├── *.example.com + proxy.example.com  — Envoy listener cert (port 3128) AND downstream wildcard (shared)
+  └── CN=scanner_sysid                   — Envoy presents to every backend (client cert)
 
 webserver-ca  (keypair generated in-cluster — secret: cert-manager/cert-manager-webserver-ca-new)
   │  ClusterIssuer: webserver-ca-issuer
@@ -258,13 +268,14 @@ No private keys exist on disk or were ever generated outside the cluster.
 
 ## How it works
 
-1. Browser sends `CONNECT api.example.com:443` to Envoy on port 3128
-2. Envoy returns `200 OK` — CONNECT tunnel established
-3. Browser performs TLS; Envoy terminates it with the `*.example.com` wildcard cert
-4. Envoy's dynamic forward proxy resolves the hostname via cluster DNS
-5. Envoy opens an mTLS connection to the backend, presenting `CN=scanner_sysid`
-6. Backend verifies the client cert against the lab CA and responds
-7. Response travels back through the tunnel to the browser
+1. Browser opens a TLS connection to Envoy on port 3128 (Session A — outer TLS)
+2. Browser sends `CONNECT api.example.com:443` inside the encrypted tunnel
+3. Envoy returns `200 OK` — CONNECT tunnel established (still inside Session A)
+4. Browser performs a second TLS handshake; Envoy terminates it with the `*.example.com` wildcard cert (Session B — inner TLS)
+5. Envoy's dynamic forward proxy resolves the hostname via cluster DNS
+6. Envoy opens an mTLS connection to the backend, presenting `CN=scanner_sysid` (Session C)
+7. Backend verifies the client cert against the lab CA and responds
+8. Response travels back through the same chain to the browser
 
 ## Spec and design docs
 

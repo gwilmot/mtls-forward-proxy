@@ -69,9 +69,27 @@ This config has two listeners: one bound to a real network port, and one that is
     socket_address:
       address: 0.0.0.0
       port_value: 3128
+  filter_chains:
+    - transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": ...DownstreamTlsContext
+          common_tls_context:
+            tls_certificates:
+              - certificate_chain:
+                  filename: /etc/envoy/certs/tls.crt
+                private_key:
+                  filename: /etc/envoy/certs/tls.key
+            tls_params:
+              tls_minimum_protocol_version: TLSv1_2
+              tls_maximum_protocol_version: TLSv1_3
 ```
 
-The **entry point**. Binds on all interfaces on port 3128 (the conventional explicit proxy port). Clients (browsers, curl) are configured to send all their traffic here. No `transport_socket` — it accepts **plain TCP**. With an explicit proxy the client must send a plaintext `CONNECT` request before any TLS can happen.
+The **entry point**. Binds on all interfaces on port 3128 (the conventional explicit proxy port). Clients (browsers, curl) are configured to send all their traffic here.
+
+The listener terminates **TLS on port 3128 (Session A)** — the CONNECT request and all subsequent tunnel data are encrypted in transit. It uses the same wildcard cert (`/etc/envoy/certs/tls.crt`) as the internal Listener 2. The only requirement is that the proxy's own hostname (e.g. `proxy.example.com`) is included as a SAN on that certificate so clients can validate the proxy connection. No separate secret or volume mount is needed.
+
+Clients must be configured with proxy protocol **HTTPS** (not plain HTTP), and must trust the CA that issued the downstream cert.
 
 #### upgrade_configs: CONNECT
 
@@ -80,7 +98,7 @@ upgrade_configs:
   - upgrade_type: CONNECT
 ```
 
-Tells the HCM to accept the `CONNECT` method. By default Envoy rejects CONNECT — this enables forward proxy tunnel behaviour. When a browser sends `CONNECT api.example.com:443 HTTP/1.1`, Envoy handles it rather than returning 405.
+Tells the HCM to accept the `CONNECT` method. By default Envoy rejects CONNECT — this enables forward proxy tunnel behaviour. When a client sends `CONNECT api.example.com:443 HTTP/1.1` (inside the outer TLS session), Envoy handles it rather than returning 405.
 
 #### Access Logging
 
@@ -113,7 +131,7 @@ virtual_hosts:
 
 A single catch-all virtual host matches every hostname. The `connect_matcher` matches only `CONNECT` method requests — any CONNECT tunnel (regardless of hostname) is routed to the `internal_tls_wildcard` cluster, which delivers it to the internal TLS-terminating listener.
 
-`connect_config: {}` tells Envoy to **terminate** the CONNECT — it responds `200 OK` and the tunnel is established. Bytes from the browser after that point are forwarded into the internal listener.
+`connect_config: {}` tells Envoy to **terminate** the CONNECT — it responds `200 OK` and the tunnel is established. Bytes from the client after that point (already decrypted from the outer Session A TLS) are forwarded into the internal listener as the payload for Session B.
 
 #### Dynamic Forward Proxy filter
 
@@ -275,23 +293,27 @@ Adding a new backend requires no changes here — as long as its server cert is 
 ## Data Flow
 
 ```
-Browser
+Browser / curl
   │
-  │  CONNECT api.example.com:443 HTTP/1.1   (plaintext → port 3128)
+  │  TLS ClientHello (SNI: proxy.example.com)   ← Session A begins
   ▼
-[Listener 1: forward_proxy]
+[Listener 1: forward_proxy]  port 3128
+  │  DownstreamTlsContext: presents *.example.com wildcard cert (proxy SAN included)
+  │  Session A TLS handshake completes
+  │
+  │  CONNECT api.example.com:443 HTTP/1.1   (inside Session A — encrypted on wire)
   │  catch-all virtual host, connect_matcher → internal_tls_wildcard cluster
   │  DFP filter populates dns_cache
-  │  200 OK (tunnel established)
+  │  200 OK (tunnel established, still inside Session A)
   │
-  │  <TLS ClientHello from browser>
+  │  <TLS ClientHello from browser>   ← Session B begins (inside Session A tunnel)
   ▼
 [Cluster: internal_tls_wildcard]
   │  envoy_internal_address → tls_termination_wildcard listener
   ▼
 [Listener 2: tls_termination_wildcard]  (internal, no network socket)
   │  DownstreamTlsContext: presents *.example.com wildcard cert to browser
-  │  TLS handshake completes; browser traffic is now decrypted
+  │  Session B TLS handshake completes; browser traffic is now decrypted
   │
   │  GET / HTTP/1.1 (plaintext HTTP, now visible to Envoy)
   │  hostOverride match: api.example.com → host_rewrite_literal: mtls-webserver.default.svc.cluster.local
@@ -299,7 +321,7 @@ Browser
   │  route → dynamic_forward_proxy_cluster
   ▼
 [Cluster: dynamic_forward_proxy_cluster]
-  │  endpoint: resolved IP of mtls-webserver service, port 443
+  │  endpoint: resolved IP of mtls-webserver service, port 443   ← Session C begins
   │  UpstreamTlsContext:
   │    - presents tls.crt (CN=scanner_sysid) to backend   ← mTLS client cert
   │    - verifies backend cert against webserver-ca tls.crt
@@ -311,6 +333,8 @@ nginx backend
 Response travels back through the same chain to the browser
 ```
 
+Every segment of the path is encrypted. Session A (port 3128 outer TLS) protects the CONNECT request itself. Session B (inner TLS) independently protects the application payload. Session C (upstream mTLS) authenticates Envoy to the backend.
+
 For a backend with no `hostOverride` (e.g. a public SaaS API), the flow is identical except the DFP filter resolves the original hostname directly via external DNS — no rewrite step.
 
 ---
@@ -319,11 +343,12 @@ For a backend with no `hostOverride` (e.g. a public SaaS API), the flow is ident
 
 | Concept | Where used | What it means |
 |---------|-----------|---------------|
-| `DownstreamTlsContext` | Listener 2 | Envoy acts as TLS **server** toward the browser |
-| `UpstreamTlsContext` | DFP cluster | Envoy acts as TLS **client** toward every backend |
+| `DownstreamTlsContext` | **Listener 1** (Session A) | Envoy acts as TLS server for the outer proxy connection on port 3128 |
+| `DownstreamTlsContext` | **Listener 2** (Session B) | Envoy acts as TLS server for the inner per-hostname connection |
+| `UpstreamTlsContext` | DFP cluster (Session C) | Envoy acts as TLS **client** toward every backend |
 | `tls_certificates` in upstream | DFP cluster | Envoy presents a client certificate — this is the **mTLS** part |
 | `validation_context` | DFP cluster | Envoy verifies every backend's server cert against the webserver CA |
-| Wildcard cert | Listener 2 | One `*.example.com` cert covers all backends — no per-hostname certs |
+| Shared wildcard cert | Listeners 1 and 2 | Same `*.example.com` cert (with proxy hostname SAN) used for both Sessions A and B |
 | `connect_matcher` | Listener 1 | Matches HTTP `CONNECT` method only |
 | `connect_config: {}` | Listener 1 | Terminates the CONNECT — Envoy responds 200 and owns the tunnel |
 | `envoy_internal_address` | `internal_tls_wildcard` | Routes to an internal listener, not a network socket |
