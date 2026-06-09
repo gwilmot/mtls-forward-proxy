@@ -108,6 +108,13 @@ data:
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                     stat_prefix: tls_term_wildcard
                     codec_type: HTTP1
+                    access_log:
+                      - name: envoy.access_loggers.file
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+                          path: /dev/stdout
+                          log_format:
+                            text_format: "[%START_TIME%] INNER \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %BYTES_SENT% \"%REQ(HOST)%\" \"%REQ(USER-AGENT)%\"\n"
                     route_config:
                       name: tls_term_route
                       virtual_hosts:
