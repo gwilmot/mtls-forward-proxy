@@ -73,6 +73,15 @@ data:
                                   - upgrade_type: CONNECT
                                     connect_config: {}
                     http_filters:
+                      - name: envoy.filters.http.lua
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                          default_source_code:
+                            inline_string: |
+                              function envoy_on_request(request_handle)
+                                local addr = request_handle:streamInfo():downstreamRemoteAddress()
+                                request_handle:headers():add("x-client-ip", addr:match("^(.+):%d+$") or addr)
+                              end
                       - name: envoy.filters.http.dynamic_forward_proxy
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
@@ -114,7 +123,7 @@ data:
                           "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
                           path: /dev/stdout
                           log_format:
-                            text_format: "[%START_TIME%] INNER \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %BYTES_SENT% \"%REQ(HOST)%\" \"%REQ(USER-AGENT)%\"\n"
+                            text_format: "[%START_TIME%] INNER \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %BYTES_SENT% \"%REQ(HOST)%\" \"%REQ(X-CLIENT-IP)%\" \"%REQ(USER-AGENT)%\"\n"
                     route_config:
                       name: tls_term_route
                       virtual_hosts:
