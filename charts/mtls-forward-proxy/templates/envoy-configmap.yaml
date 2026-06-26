@@ -62,19 +62,21 @@ data:
                     route_config:
                       name: local_route
                       virtual_hosts:
-                        - name: external_example_com
-                          domains: ["*.external.example.com:*", "*.external.example.com"]
-                          routes:
-                            - match:
-                                connect_matcher: {}
-                              route:
-                                cluster: upstream_proxy_cluster
-                                upgrade_configs:
-                                  - upgrade_type: CONNECT
-                                    connect_config: {}
                         - name: all_hosts
                           domains: ["*"]
                           routes:
+                            - match:
+                                connect_matcher: {}
+                                headers:
+                                  - name: ":authority"
+                                    string_match:
+                                      safe_regex:
+                                        regex: "^[^.]+\\.external\\.example\\.com(:\\d+)?$"
+                              route:
+                                cluster: upstream_proxy_tunnel
+                                upgrade_configs:
+                                  - upgrade_type: CONNECT
+                                    connect_config: {}
                             - match:
                                 connect_matcher: {}
                               route:
@@ -163,6 +165,22 @@ data:
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
+        # Listener 3: internal listener that re-issues CONNECT to the upstream proxy.
+        # Receives tunnelled bytes from Listener 1 for *.external.example.com and
+        # forwards them via HTTP CONNECT to upstream-proxy.internal.com:8080.
+        - name: upstream_proxy_tunnel
+          internal_listener: {}
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.tcp_proxy
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                    stat_prefix: upstream_proxy_tunnel
+                    cluster: upstream_proxy_cluster
+                    tunneling_config:
+                      hostname: "%DYNAMIC_METADATA(tunnel.destination)%"
+                      use_post: false
+
       clusters:
 
         # Routes CONNECT tunnels into the single internal TLS-terminating listener.
@@ -186,8 +204,18 @@ data:
                 typed_config:
                   "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
 
-        # Forwards CONNECT tunnels for *.external.example.com to the upstream proxy
-        # without TLS inspection — the tunnel payload is passed through opaquely.
+        # Routes *.external.example.com CONNECT tunnels into the upstream_proxy_tunnel internal listener.
+        - name: upstream_proxy_tunnel
+          load_assignment:
+            cluster_name: upstream_proxy_tunnel
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        envoy_internal_address:
+                          server_listener_name: upstream_proxy_tunnel
+
+        # Plain TCP cluster to the upstream HTTP proxy — used by the tcp_proxy tunneling_config.
         - name: upstream_proxy_cluster
           connect_timeout: 10s
           type: LOGICAL_DNS
