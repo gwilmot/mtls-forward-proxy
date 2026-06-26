@@ -62,6 +62,16 @@ data:
                     route_config:
                       name: local_route
                       virtual_hosts:
+                        - name: external_example_com
+                          domains: ["*.external.example.com:*", "*.external.example.com"]
+                          routes:
+                            - match:
+                                connect_matcher: {}
+                              route:
+                                cluster: upstream_proxy_cluster
+                                upgrade_configs:
+                                  - upgrade_type: CONNECT
+                                    connect_config: {}
                         - name: all_hosts
                           domains: ["*"]
                           routes:
@@ -175,6 +185,22 @@ data:
                 name: envoy.transport_sockets.raw_buffer
                 typed_config:
                   "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+
+        # Forwards CONNECT tunnels for *.external.example.com to the upstream proxy
+        # without TLS inspection — the tunnel payload is passed through opaquely.
+        - name: upstream_proxy_cluster
+          connect_timeout: 10s
+          type: LOGICAL_DNS
+          dns_lookup_family: V4_ONLY
+          load_assignment:
+            cluster_name: upstream_proxy_cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: upstream-proxy.internal.com
+                          port_value: 8080
 
         # Dynamic forward proxy cluster — resolves the target host from the request
         # at runtime via DNS, then connects with mTLS using the configured client cert.
