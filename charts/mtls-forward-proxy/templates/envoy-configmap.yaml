@@ -178,7 +178,7 @@ data:
                     stat_prefix: upstream_proxy_tunnel
                     cluster: upstream_proxy_cluster
                     tunneling_config:
-                      hostname: "%DYNAMIC_METADATA(tunnel.destination)%"
+                      hostname: "%FILTER_STATE(io.envoy.tunnel.destination)%"
                       use_post: false
 
       clusters:
